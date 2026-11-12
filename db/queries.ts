@@ -61,7 +61,7 @@ export async function getHomeData() {
   }
 
   const db = getDb();
-  const [user] = await db
+  let [user] = await db
     .select({
       id: usersTable.id,
       name: usersTable.name,
@@ -74,6 +74,37 @@ export async function getHomeData() {
     .from(usersTable)
     .where(eq(usersTable.id, session.user.id))
     .limit(1);
+
+  if (!user) {
+    const name =
+      session.user.name?.trim() || session.user.email || "Користувач";
+    const [firstName = "", ...lastNameParts] = name.split(/\s+/);
+
+    await db
+      .insert(usersTable)
+      .values({
+        id: session.user.id,
+        email: session.user.email,
+        name,
+        firstName,
+        lastName: lastNameParts.join(" "),
+      })
+      .onConflictDoNothing();
+
+    [user] = await db
+      .select({
+        id: usersTable.id,
+        name: usersTable.name,
+        email: usersTable.email,
+        firstName: usersTable.firstName,
+        lastName: usersTable.lastName,
+        middleName: usersTable.middleName,
+        avatar: usersTable.avatar,
+      })
+      .from(usersTable)
+      .where(eq(usersTable.id, session.user.id))
+      .limit(1);
+  }
 
   if (!user) {
     throw new Error("Профіль не знайдено. Спробуйте увійти ще раз.");
