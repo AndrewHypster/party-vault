@@ -47,3 +47,9 @@ Owners can make a company searchable, choose whether its balance appears in
 search results, and control who can identify contributors. Company members can
 see the shared transaction history and company-level totals. Only owners can
 record expenses, review join requests, or change company settings.
+
+Members can view the active member list and join dates. Owners can remove
+members. Deleting a company requires the owner's affirmative vote and votes in
+favor from more than half of the other active members captured when voting
+starts. Voting expires after seven days; if the threshold is not reached, the
+company remains.

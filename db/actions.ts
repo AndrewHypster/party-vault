@@ -4,11 +4,14 @@ import { auth, signOut } from "@/auth";
 import { getDb } from "@/db";
 import {
   companiesTable,
+  companyDeletionProposalsTable,
+  companyDeletionVotesTable,
   membershipsTable,
   transactionsTable,
   usersTable,
 } from "@/db/schema";
-import { and, eq } from "drizzle-orm";
+import { and, eq, gt, isNull } from "drizzle-orm";
+import { isAvatarOption } from "@/lib/avatars";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { randomUUID } from "crypto";
@@ -107,7 +110,10 @@ export async function requestToJoin(companyId: string) {
       userId,
       status: "pending",
     });
-  } else if (existing.status === "rejected") {
+  } else if (
+    existing.status === "rejected" ||
+    existing.status === "removed"
+  ) {
     await db
       .update(membershipsTable)
       .set({ status: "pending" })
@@ -144,10 +150,19 @@ export async function reviewJoinRequest(
   if (!company || company.ownerId !== userId) {
     throw new Error("Лише власник компанії може розглядати запити.");
   }
+  if (approve && (await hasActiveDeletionVote(db, companyId))) {
+    throw new Error(
+      "Під час голосування за видалення не можна змінювати склад компанії.",
+    );
+  }
 
   const [updatedRequest] = await db
     .update(membershipsTable)
-    .set({ status: approve ? "active" : "rejected" })
+    .set(
+      approve
+        ? { status: "active", createdAt: new Date() }
+        : { status: "rejected" },
+    )
     .where(
       and(
         eq(membershipsTable.id, membershipId),
@@ -161,6 +176,302 @@ export async function reviewJoinRequest(
   }
   revalidatePath(`/company/${companyId}`);
   revalidatePath("/");
+}
+
+export async function removeCompanyMember(companyId: string, memberId: string) {
+  const userId = await requireUserId();
+  if (
+    typeof companyId !== "string" ||
+    !companyId ||
+    typeof memberId !== "string" ||
+    !memberId
+  ) {
+    throw new Error("Учасника або компанію не знайдено.");
+  }
+
+  const db = getDb();
+  const [company] = await db
+    .select({ ownerId: companiesTable.ownerId })
+    .from(companiesTable)
+    .where(eq(companiesTable.id, companyId))
+    .limit(1);
+  if (!company || company.ownerId !== userId) {
+    throw new Error("Видаляти учасників може лише власник компанії.");
+  }
+  if (memberId === company.ownerId) {
+    throw new Error("Власника компанії не можна видалити зі складу.");
+  }
+  if (await hasActiveDeletionVote(db, companyId)) {
+    throw new Error(
+      "Під час голосування за видалення не можна змінювати склад компанії.",
+    );
+  }
+
+  const [removedMember] = await db
+    .update(membershipsTable)
+    .set({ status: "removed" })
+    .where(
+      and(
+        eq(membershipsTable.companyId, companyId),
+        eq(membershipsTable.userId, memberId),
+        eq(membershipsTable.status, "active"),
+      ),
+    )
+    .returning({ id: membershipsTable.id });
+  if (!removedMember) {
+    throw new Error("Активного учасника не знайдено.");
+  }
+
+  revalidatePath(`/company/${companyId}`);
+  revalidatePath("/");
+}
+
+async function hasActiveDeletionVote(
+  db: ReturnType<typeof getDb>,
+  companyId: string,
+) {
+  const [proposal] = await db
+    .select({ id: companyDeletionProposalsTable.id })
+    .from(companyDeletionProposalsTable)
+    .where(
+      and(
+        eq(companyDeletionProposalsTable.companyId, companyId),
+        eq(companyDeletionProposalsTable.status, "pending"),
+        gt(companyDeletionProposalsTable.expiresAt, new Date()),
+      ),
+    )
+    .limit(1);
+  return Boolean(proposal);
+}
+
+async function deleteCompany(db: ReturnType<typeof getDb>, companyId: string) {
+  await db.batch([
+    db.delete(transactionsTable).where(eq(transactionsTable.companyId, companyId)),
+    db.delete(membershipsTable).where(eq(membershipsTable.companyId, companyId)),
+    db.delete(companiesTable).where(eq(companiesTable.id, companyId)),
+  ]);
+}
+
+export async function startCompanyDeletionVote(companyId: string) {
+  const userId = await requireUserId();
+  if (typeof companyId !== "string" || !companyId) {
+    throw new Error("Компанію не знайдено.");
+  }
+
+  const db = getDb();
+  const [company] = await db
+    .select({ ownerId: companiesTable.ownerId })
+    .from(companiesTable)
+    .where(eq(companiesTable.id, companyId))
+    .limit(1);
+  if (!company || company.ownerId !== userId) {
+    throw new Error("Запустити голосування може лише власник компанії.");
+  }
+
+  const now = new Date();
+  const [activeProposal] = await db
+    .select({
+      id: companyDeletionProposalsTable.id,
+      expiresAt: companyDeletionProposalsTable.expiresAt,
+    })
+    .from(companyDeletionProposalsTable)
+    .where(
+      and(
+        eq(companyDeletionProposalsTable.companyId, companyId),
+        eq(companyDeletionProposalsTable.status, "pending"),
+      ),
+    )
+    .limit(1);
+  if (activeProposal && activeProposal.expiresAt > now) {
+    throw new Error("Для цієї компанії вже триває голосування.");
+  }
+  if (activeProposal) {
+    await db
+      .update(companyDeletionProposalsTable)
+      .set({ status: "expired" })
+      .where(eq(companyDeletionProposalsTable.id, activeProposal.id));
+  }
+
+  const members = await db
+    .select({ userId: membershipsTable.userId })
+    .from(membershipsTable)
+    .where(
+      and(
+        eq(membershipsTable.companyId, companyId),
+        eq(membershipsTable.status, "active"),
+      ),
+    );
+  if (!members.some((member) => member.userId === userId)) {
+    throw new Error("Власник має бути активним учасником компанії.");
+  }
+  if (members.length < 2) {
+    throw new Error(
+      "Для голосування потрібен щонайменше один учасник, крім власника.",
+    );
+  }
+
+  const proposalId = randomUUID();
+  const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  await db.batch([
+    db.insert(companyDeletionProposalsTable).values({
+      id: proposalId,
+      companyId,
+      initiatedById: userId,
+      expiresAt,
+    }),
+    db.insert(companyDeletionVotesTable).values(
+      members.map((member) => ({
+        id: randomUUID(),
+        proposalId,
+        userId: member.userId,
+        vote: member.userId === userId ? true : null,
+      })),
+    ),
+  ]);
+
+  revalidatePath("/");
+  revalidatePath(`/company/${companyId}`);
+  return { deleted: false };
+}
+
+export async function voteOnCompanyDeletion(
+  companyId: string,
+  proposalId: string,
+  vote: boolean,
+) {
+  const userId = await requireUserId();
+  if (
+    typeof companyId !== "string" ||
+    !companyId ||
+    typeof proposalId !== "string" ||
+    !proposalId ||
+    typeof vote !== "boolean"
+  ) {
+    throw new Error("Голос некоректний.");
+  }
+
+  const db = getDb();
+  const [proposal] = await db
+    .select({
+      id: companyDeletionProposalsTable.id,
+      initiatedById: companyDeletionProposalsTable.initiatedById,
+      expiresAt: companyDeletionProposalsTable.expiresAt,
+    })
+    .from(companyDeletionProposalsTable)
+    .where(
+      and(
+        eq(companyDeletionProposalsTable.id, proposalId),
+        eq(companyDeletionProposalsTable.companyId, companyId),
+        eq(companyDeletionProposalsTable.status, "pending"),
+      ),
+    )
+    .limit(1);
+  if (!proposal) {
+    throw new Error("Активне голосування не знайдено.");
+  }
+  if (proposal.expiresAt <= new Date()) {
+    await db
+      .update(companyDeletionProposalsTable)
+      .set({ status: "expired" })
+      .where(eq(companyDeletionProposalsTable.id, proposal.id));
+    revalidatePath(`/company/${companyId}`);
+    return { deleted: false, expired: true };
+  }
+
+  const [membership] = await db
+    .select({ id: membershipsTable.id })
+    .from(membershipsTable)
+    .where(
+      and(
+        eq(membershipsTable.companyId, companyId),
+        eq(membershipsTable.userId, userId),
+        eq(membershipsTable.status, "active"),
+      ),
+    )
+    .limit(1);
+  if (!membership) {
+    throw new Error("Голосувати можуть лише активні учасники компанії.");
+  }
+
+  const [ballot] = await db
+    .update(companyDeletionVotesTable)
+    .set({ vote })
+    .where(
+      and(
+        eq(companyDeletionVotesTable.proposalId, proposalId),
+        eq(companyDeletionVotesTable.userId, userId),
+        isNull(companyDeletionVotesTable.vote),
+      ),
+    )
+    .returning({ id: companyDeletionVotesTable.id });
+  if (!ballot) {
+    throw new Error("Ви не входите до складу учасників цього голосування.");
+  }
+
+  const ballots = await db
+    .select({
+      userId: companyDeletionVotesTable.userId,
+      vote: companyDeletionVotesTable.vote,
+    })
+    .from(companyDeletionVotesTable)
+    .where(eq(companyDeletionVotesTable.proposalId, proposalId));
+  const yesCount = ballots.filter((item) => item.vote === true).length;
+  const majority = Math.floor((ballots.length - 1) / 2) + 2;
+  const ownerVotedYes = ballots.some(
+    (item) =>
+      item.userId === proposal.initiatedById && item.vote === true,
+  );
+  const deleted = ownerVotedYes && yesCount >= majority;
+  if (deleted) {
+    await deleteCompany(db, companyId);
+    revalidatePath("/");
+    revalidatePath(`/company/${companyId}`);
+    return { deleted: true, expired: false };
+  }
+
+  revalidatePath(`/company/${companyId}`);
+  return { deleted: false, expired: false };
+}
+
+export async function cancelCompanyDeletionVote(
+  companyId: string,
+  proposalId: string,
+) {
+  const userId = await requireUserId();
+  if (
+    typeof companyId !== "string" ||
+    !companyId ||
+    typeof proposalId !== "string" ||
+    !proposalId
+  ) {
+    throw new Error("Голосування не знайдено.");
+  }
+
+  const db = getDb();
+  const [company] = await db
+    .select({ ownerId: companiesTable.ownerId })
+    .from(companiesTable)
+    .where(eq(companiesTable.id, companyId))
+    .limit(1);
+  if (!company || company.ownerId !== userId) {
+    throw new Error("Скасувати голосування може лише власник компанії.");
+  }
+
+  const [canceled] = await db
+    .update(companyDeletionProposalsTable)
+    .set({ status: "canceled" })
+    .where(
+      and(
+        eq(companyDeletionProposalsTable.id, proposalId),
+        eq(companyDeletionProposalsTable.companyId, companyId),
+        eq(companyDeletionProposalsTable.status, "pending"),
+      ),
+    )
+    .returning({ id: companyDeletionProposalsTable.id });
+  if (!canceled) {
+    throw new Error("Активне голосування не знайдено.");
+  }
+  revalidatePath(`/company/${companyId}`);
 }
 
 export async function createTransaction(data: {
@@ -323,8 +634,7 @@ export async function updateProfile(data: {
     typeof data.middleName === "string"
       ? data.middleName.trim().slice(0, 50)
       : "";
-  const allowedAvatars = ["🙂", "😎", "🦊", "🐼", "🐸", "🐱", "🐻", "🦄"];
-  if (!allowedAvatars.includes(data.avatar)) {
+  if (!isAvatarOption(data.avatar)) {
     throw new Error("Оберіть смайлик зі списку.");
   }
 

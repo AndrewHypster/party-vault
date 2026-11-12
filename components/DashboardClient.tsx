@@ -17,6 +17,7 @@ import {
   Wallet,
   X,
 } from "lucide-react";
+import { avatarGroups, popularAvatars } from "@/lib/avatars";
 import {
   createCompany,
   requestToJoin,
@@ -51,7 +52,6 @@ type DashboardData = {
 const money = new Intl.NumberFormat("uk-UA", {
   maximumFractionDigits: 0,
 });
-const avatarOptions = ["🙂", "😎", "🦊", "🐼", "🐸", "🐱", "🐻", "🦄"];
 
 function Avatar({
   emoji,
@@ -97,7 +97,7 @@ function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="modal-heading"
-        className="w-full max-w-md rounded-[28px] border border-white/[0.1] bg-[#111620] p-6 shadow-2xl shadow-black/50"
+        className="max-h-[90dvh] w-full max-w-md overflow-y-auto rounded-[28px] border border-white/[0.1] bg-[#111620] p-6 shadow-2xl shadow-black/50"
       >
         <div className="mb-6 flex items-start justify-between">
           <div>
@@ -127,7 +127,9 @@ function Modal({
 }
 
 export function DashboardClient({ data }: { data: DashboardData }) {
-  const [dialog, setDialog] = useState<"company" | "profile" | null>(null);
+  const [dialog, setDialog] = useState<"company" | "profile" | null>(
+    data.user.avatar ? null : "profile",
+  );
   const [search, setSearch] = useState("");
   const [companyName, setCompanyName] = useState("");
   const [companyDescription, setCompanyDescription] = useState("");
@@ -135,6 +137,10 @@ export function DashboardClient({ data }: { data: DashboardData }) {
   const [lastName, setLastName] = useState(data.user.lastName);
   const [middleName, setMiddleName] = useState(data.user.middleName ?? "");
   const [avatar, setAvatar] = useState(data.user.avatar ?? "🙂");
+  const [avatarCategory, setAvatarCategory] = useState<
+    "Популярні" | (typeof avatarGroups)[number]["name"]
+  >("Популярні");
+  const [avatarPickerOpen, setAvatarPickerOpen] = useState(!data.user.avatar);
   const [notice, setNotice] = useState("");
   const [pending, startTransition] = useTransition();
 
@@ -150,6 +156,14 @@ export function DashboardClient({ data }: { data: DashboardData }) {
         .includes(query),
     );
   }, [data.discover, search]);
+  const visibleAvatars = useMemo(
+    () =>
+      avatarCategory === "Популярні"
+        ? popularAvatars
+        : (avatarGroups.find((group) => group.name === avatarCategory)
+            ?.options ?? []),
+    [avatarCategory],
+  );
 
   const runAction = (
     action: () => Promise<void>,
@@ -631,23 +645,78 @@ export function DashboardClient({ data }: { data: DashboardData }) {
               <p className="mb-2 text-xs font-semibold text-slate-400">
                 Обери смайлик
               </p>
-              <div className="flex flex-wrap gap-2">
-                {avatarOptions.map((option) => (
-                  <button
-                    key={option}
-                    type="button"
-                    onClick={() => setAvatar(option)}
-                    aria-label={`Аватар ${option}`}
-                    className={`flex h-10 w-10 items-center justify-center rounded-xl border text-lg transition ${
-                      avatar === option
-                        ? "border-indigo-400 bg-indigo-400/15"
-                        : "border-white/[0.08] bg-[#0b0e14] hover:border-white/20"
-                    }`}
-                  >
-                    {option}
-                  </button>
-                ))}
+              <div className="flex items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-[#0b0e14] p-3">
+                <div className="flex items-center gap-3">
+                  <Avatar emoji={avatar} size="sm" />
+                  <span className="text-xs text-slate-400">
+                    Обраний аватар
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  aria-expanded={avatarPickerOpen}
+                  onClick={() => setAvatarPickerOpen((open) => !open)}
+                  className="rounded-lg border border-white/[0.1] px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-white/[0.05]"
+                >
+                  {avatarPickerOpen ? "Згорнути" : "Змінити"}
+                </button>
               </div>
+              {avatarPickerOpen && (
+                <div className="mt-3 rounded-xl border border-white/[0.08] bg-[#0b0e14] p-3">
+                  <div
+                    role="tablist"
+                    aria-label="Категорії аватарів"
+                    className="flex gap-2 overflow-x-auto pb-2"
+                  >
+                    {(["Популярні", ...avatarGroups.map((group) => group.name)] as const).map(
+                      (category) => (
+                        <button
+                          key={category}
+                          type="button"
+                          role="tab"
+                          aria-selected={avatarCategory === category}
+                          onClick={() => setAvatarCategory(category)}
+                          className={`shrink-0 rounded-lg px-3 py-2 text-xs font-semibold transition ${
+                            avatarCategory === category
+                              ? "bg-indigo-400/15 text-indigo-200"
+                              : "text-slate-500 hover:bg-white/[0.04] hover:text-slate-200"
+                          }`}
+                        >
+                          {category}
+                        </button>
+                      ),
+                    )}
+                  </div>
+                  <div
+                    role="tabpanel"
+                    className="grid max-h-44 grid-cols-6 gap-2 overflow-y-auto overscroll-contain pt-2 sm:grid-cols-8"
+                  >
+                    {visibleAvatars.map((option) => (
+                      <button
+                        key={option}
+                        type="button"
+                        onClick={() => {
+                          setAvatar(option);
+                          setAvatarPickerOpen(false);
+                        }}
+                        aria-label={`Аватар ${option}`}
+                        aria-pressed={avatar === option}
+                        className={`flex h-10 items-center justify-center rounded-xl border text-xl transition ${
+                          avatar === option
+                            ? "border-indigo-400 bg-indigo-400/15"
+                            : "border-white/[0.06] bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.05]"
+                        }`}
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-center text-[10px] text-slate-600">
+                    {visibleAvatars.length} смайликів у категорії · прокрути для
+                    перегляду
+                  </p>
+                </div>
+              )}
             </div>
             {[
               {

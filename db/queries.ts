@@ -4,6 +4,8 @@ import { auth } from "@/auth";
 import { getDb } from "@/db";
 import {
   companiesTable,
+  companyDeletionProposalsTable,
+  companyDeletionVotesTable,
   membershipsTable,
   transactionsTable,
   usersTable,
@@ -186,6 +188,7 @@ export async function getCompanyDashboard(companyId: string) {
       name: usersTable.name,
       avatar: usersTable.avatar,
       role: membershipsTable.role,
+      joinedAt: membershipsTable.createdAt,
     })
     .from(membershipsTable)
     .innerJoin(usersTable, eq(membershipsTable.userId, usersTable.id))
@@ -339,6 +342,59 @@ export async function getCompanyDashboard(companyId: string) {
       .filter((row) => row.userId)
       .map((row) => [row.userId as string, Number(row.total)]),
   );
+  const [activeDeletionProposal] = await db
+    .select({
+      id: companyDeletionProposalsTable.id,
+      initiatedById: companyDeletionProposalsTable.initiatedById,
+      createdAt: companyDeletionProposalsTable.createdAt,
+      expiresAt: companyDeletionProposalsTable.expiresAt,
+    })
+    .from(companyDeletionProposalsTable)
+    .where(
+      and(
+        eq(companyDeletionProposalsTable.companyId, companyId),
+        eq(companyDeletionProposalsTable.status, "pending"),
+      ),
+    )
+    .limit(1);
+  let deletionVote = null;
+  if (
+    activeDeletionProposal &&
+    activeDeletionProposal.expiresAt.getTime() > Date.now()
+  ) {
+    const ballots = await db
+      .select({
+        userId: companyDeletionVotesTable.userId,
+        vote: companyDeletionVotesTable.vote,
+        firstName: usersTable.firstName,
+        name: usersTable.name,
+        avatar: usersTable.avatar,
+      })
+      .from(companyDeletionVotesTable)
+      .innerJoin(
+        usersTable,
+        eq(companyDeletionVotesTable.userId, usersTable.id),
+      )
+      .where(eq(companyDeletionVotesTable.proposalId, activeDeletionProposal.id));
+    deletionVote = {
+      id: activeDeletionProposal.id,
+      initiatedById: activeDeletionProposal.initiatedById,
+      createdAt: activeDeletionProposal.createdAt.toISOString(),
+      expiresAt: activeDeletionProposal.expiresAt.toISOString(),
+      totalVoters: ballots.length,
+      majority: Math.floor((ballots.length - 1) / 2) + 2,
+      yesCount: ballots.filter((ballot) => ballot.vote === true).length,
+      currentUserVote:
+        ballots.find((ballot) => ballot.userId === session.user.id)?.vote ??
+        null,
+      voters: ballots.map((ballot) => ({
+        id: ballot.userId,
+        displayName: ballot.firstName || ballot.name,
+        avatar: ballot.avatar,
+        vote: ballot.vote,
+      })),
+    };
+  }
 
   return {
     kind: "dashboard" as const,
@@ -359,9 +415,11 @@ export async function getCompanyDashboard(companyId: string) {
     members: members.map((member) => ({
       ...member,
       displayName: member.firstName || member.name,
+      joinedAt: member.joinedAt.toISOString(),
       contributed: memberTotals.get(member.id) ?? 0,
     })),
     currentUserId: session.user.id,
+    deletionVote,
     transactions,
     monthly,
     pendingRequests: pendingRequests.map((request) => ({

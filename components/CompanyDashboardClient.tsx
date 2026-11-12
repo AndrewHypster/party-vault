@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import {
+  AlertTriangle,
   ArrowDownLeft,
   ArrowLeft,
   ArrowUpRight,
@@ -15,14 +17,20 @@ import {
   ReceiptText,
   Settings,
   Shield,
+  Trash2,
+  UserMinus,
   Users,
   Wallet,
   X,
 } from "lucide-react";
 import {
+  cancelCompanyDeletionVote,
   createTransaction,
+  removeCompanyMember,
   reviewJoinRequest,
+  startCompanyDeletionVote,
   updateCompanySettings,
+  voteOnCompanyDeletion,
 } from "@/db/actions";
 
 type Visibility = "everyone" | "owner" | "names";
@@ -51,6 +59,7 @@ type CompanyData = {
     avatar: string | null;
     role: string;
     displayName: string;
+    joinedAt: string;
     contributed: number;
   }[];
   transactions: {
@@ -75,6 +84,22 @@ type CompanyData = {
     createdAt: string;
     displayName: string;
   }[];
+  deletionVote: {
+    id: string;
+    initiatedById: string;
+    createdAt: string;
+    expiresAt: string;
+    totalVoters: number;
+    majority: number;
+    yesCount: number;
+    currentUserVote: boolean | null;
+    voters: {
+      id: string;
+      displayName: string;
+      avatar: string | null;
+      vote: boolean | null;
+    }[];
+  } | null;
 };
 
 const money = new Intl.NumberFormat("uk-UA", { maximumFractionDigits: 0 });
@@ -84,6 +109,12 @@ const dateFormat = new Intl.DateTimeFormat("uk-UA", {
   month: "short",
   hour: "2-digit",
   minute: "2-digit",
+  timeZone: "Europe/Kyiv",
+});
+const joinedDateFormat = new Intl.DateTimeFormat("uk-UA", {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
   timeZone: "Europe/Kyiv",
 });
 
@@ -132,6 +163,7 @@ function Modal({
 }
 
 export function CompanyDashboardClient({ data }: { data: CompanyData }) {
+  const router = useRouter();
   const [dialog, setDialog] = useState<"income" | "expense" | "settings" | null>(
     null,
   );
@@ -209,6 +241,61 @@ export function CompanyDashboardClient({ data }: { data: CompanyData }) {
       "Налаштування збережено.",
       () => setDialog(null),
     );
+  };
+
+  const handleStartDeletionVote = () => {
+    if (
+      !window.confirm(
+        "Почати голосування за видалення компанії? Ваш голос «за» буде зараховано одразу.",
+      )
+    ) {
+      return;
+    }
+
+    setNotice("");
+    startTransition(async () => {
+      try {
+        const result = await startCompanyDeletionVote(data.company.id);
+        setDialog(null);
+        if (result.deleted) {
+          router.replace("/");
+          return;
+        }
+        setNotice("Голосування за видалення компанії розпочато.");
+      } catch (error) {
+        setNotice(
+          error instanceof Error ? error.message : "Не вдалося почати голосування.",
+        );
+      }
+    });
+  };
+
+  const handleDeletionVote = (vote: boolean) => {
+    if (!data.deletionVote) return;
+
+    setNotice("");
+    startTransition(async () => {
+      try {
+        const result = await voteOnCompanyDeletion(
+          data.company.id,
+          data.deletionVote!.id,
+          vote,
+        );
+        if (result.deleted) {
+          router.replace("/");
+          return;
+        }
+        setNotice(
+          result.expired
+            ? "Термін голосування завершився. Компанію не видалено."
+            : "Ваш голос зараховано.",
+        );
+      } catch (error) {
+        setNotice(
+          error instanceof Error ? error.message : "Не вдалося зарахувати голос.",
+        );
+      }
+    });
   };
 
   const maxMonthlyAmount = Math.max(
@@ -321,9 +408,13 @@ export function CompanyDashboardClient({ data }: { data: CompanyData }) {
                   Спільна мета — спільна каса
                 </p>
               </div>
-              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-400/10 text-indigo-300">
+              <a
+                href="#members"
+                aria-label="Переглянути список учасників"
+                className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-400/10 text-indigo-300 transition hover:bg-indigo-400/15"
+              >
                 <Users className="h-4 w-4" />
-              </span>
+              </a>
             </div>
             <div className="mt-5 flex items-center">
               {data.members.slice(0, 5).map((member, index) => (
@@ -366,6 +457,115 @@ export function CompanyDashboardClient({ data }: { data: CompanyData }) {
             )}
           </div>
         </section>
+
+        {data.deletionVote && (
+          <section className="mt-4 rounded-[24px] border border-rose-400/20 bg-rose-400/[0.04] p-5 sm:p-6">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-rose-300">
+                  <AlertTriangle className="h-4 w-4" />
+                  Голосування за видалення
+                </p>
+                <h2 className="mt-2 text-base font-bold text-white">
+                  Потрібно «за»: {data.deletionVote.yesCount} /{" "}
+                  {data.deletionVote.majority}
+                </h2>
+                <p className="mt-1 text-xs text-slate-400">
+                  Голос власника вже враховано; ще потрібна більшість інших
+                  активних учасників до{" "}
+                  {dateFormat.format(new Date(data.deletionVote.expiresAt))}.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {data.deletionVote.currentUserVote === null ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={pending}
+                      onClick={() => handleDeletionVote(true)}
+                      className="rounded-xl bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-300 transition hover:bg-emerald-500/25 disabled:opacity-50"
+                    >
+                      За
+                    </button>
+                    <button
+                      type="button"
+                      disabled={pending}
+                      onClick={() => handleDeletionVote(false)}
+                      className="rounded-xl bg-rose-500/15 px-3 py-2 text-xs font-semibold text-rose-300 transition hover:bg-rose-500/25 disabled:opacity-50"
+                    >
+                      Проти
+                    </button>
+                  </>
+                ) : (
+                  <span className="rounded-xl border border-white/[0.08] px-3 py-2 text-xs font-semibold text-slate-300">
+                    Ваш голос:{" "}
+                    {data.deletionVote.currentUserVote ? "за" : "проти"}
+                  </span>
+                )}
+                {data.company.isOwner && (
+                  <button
+                    type="button"
+                    disabled={pending}
+                    onClick={() =>
+                      runAction(
+                        () =>
+                          cancelCompanyDeletionVote(
+                            data.company.id,
+                            data.deletionVote!.id,
+                          ),
+                        "Голосування скасовано.",
+                      )
+                    }
+                    className="rounded-xl border border-white/[0.08] px-3 py-2 text-xs font-semibold text-slate-400 transition hover:text-white disabled:opacity-50"
+                  >
+                    Скасувати
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-white/[0.07]">
+              <div
+                className="h-full rounded-full bg-rose-400 transition-all"
+                style={{
+                  width: `${Math.min(
+                    100,
+                    (data.deletionVote.yesCount /
+                      data.deletionVote.majority) *
+                      100,
+                  )}%`,
+                }}
+              />
+            </div>
+            <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {data.deletionVote.voters.map((voter) => (
+                <div
+                  key={voter.id}
+                  className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-[#111620]/70 px-3 py-2"
+                >
+                  <span className="text-base">{voter.avatar ?? "🙂"}</span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-slate-300">
+                    {voter.displayName}
+                  </span>
+                  <span
+                    className={`text-[10px] font-semibold ${
+                      voter.vote === true
+                        ? "text-emerald-300"
+                        : voter.vote === false
+                          ? "text-rose-300"
+                          : "text-slate-500"
+                    }`}
+                  >
+                    {voter.vote === true
+                      ? "За"
+                      : voter.vote === false
+                        ? "Проти"
+                        : "Очікує"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         <section className="mt-4 grid gap-4 lg:grid-cols-[1.4fr_0.6fr]">
           <div className="rounded-[24px] border border-white/[0.07] bg-[#111620] p-5 sm:p-6">
@@ -488,6 +688,85 @@ export function CompanyDashboardClient({ data }: { data: CompanyData }) {
                 історію каси відповідно до налаштувань приватності.
               </div>
             )}
+          </div>
+        </section>
+
+        <section
+          id="members"
+          className="mt-4 rounded-[24px] border border-white/[0.07] bg-[#111620] p-5 sm:p-6"
+        >
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                Склад компанії
+              </p>
+              <h2 className="mt-1 text-base font-bold text-white">
+                Учасники ({data.members.length})
+              </h2>
+            </div>
+            <Users className="h-4 w-4 text-slate-500" />
+          </div>
+          <div className="divide-y divide-white/[0.06]">
+            {data.members.map((member) => (
+              <article
+                key={member.id}
+                className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-1"
+              >
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/[0.05] text-lg">
+                    {member.avatar ?? "🙂"}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-slate-200">
+                      {member.displayName}
+                      {member.id === data.currentUserId && (
+                        <span className="ml-2 text-[10px] font-medium text-slate-500">
+                          це ви
+                        </span>
+                      )}
+                    </p>
+                    <p className="mt-0.5 text-xs text-slate-500">
+                      Приєднався{" "}
+                      {joinedDateFormat.format(new Date(member.joinedAt))}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  {member.role === "owner" && (
+                    <span className="rounded-full border border-indigo-400/15 bg-indigo-400/[0.08] px-2.5 py-1 text-[10px] font-semibold text-indigo-200">
+                      Власник
+                    </span>
+                  )}
+                  {data.company.isOwner && member.role !== "owner" && (
+                    <button
+                      type="button"
+                      disabled={pending}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Видалити ${member.displayName} з компанії?`,
+                          )
+                        ) {
+                          runAction(
+                            () =>
+                              removeCompanyMember(
+                                data.company.id,
+                                member.id,
+                              ),
+                            `${member.displayName} видалено з компанії.`,
+                          );
+                        }
+                      }}
+                      aria-label={`Видалити ${member.displayName} з компанії`}
+                      title="Видалити учасника"
+                      className="flex h-9 w-9 items-center justify-center rounded-xl border border-rose-400/10 text-rose-300/70 transition hover:border-rose-400/30 hover:bg-rose-400/10 hover:text-rose-300 disabled:opacity-50"
+                    >
+                      <UserMinus className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
+              </article>
+            ))}
           </div>
         </section>
 
@@ -846,6 +1125,27 @@ export function CompanyDashboardClient({ data }: { data: CompanyData }) {
             >
               <Check className="h-4 w-4" /> Зберегти налаштування
             </button>
+            <div className="border-t border-rose-400/15 pt-5">
+              <p className="text-sm font-semibold text-rose-200">
+                Видалити компанію
+              </p>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                Голос власника «за» враховується окремо. Для видалення також
+                потрібна більшість інших активних учасників. На голосування
+                дається 7 днів.
+              </p>
+              <button
+                type="button"
+                disabled={pending || Boolean(data.deletionVote)}
+                onClick={handleStartDeletionVote}
+                className="mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-rose-400/20 bg-rose-400/[0.06] text-xs font-semibold text-rose-300 transition hover:bg-rose-400/10 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Trash2 className="h-4 w-4" />
+                {data.deletionVote
+                  ? "Голосування вже триває"
+                  : "Розпочати голосування"}
+              </button>
+            </div>
           </form>
         </Modal>
       )}

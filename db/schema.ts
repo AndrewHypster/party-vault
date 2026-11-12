@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
   integer,
@@ -48,6 +49,50 @@ export const membershipsTable = pgTable(
   (table) => [
     uniqueIndex("memberships_company_user_unique").on(
       table.companyId,
+      table.userId,
+    ),
+  ],
+);
+
+export const companyDeletionProposalsTable = pgTable(
+  "company_deletion_proposals",
+  {
+    id: text("id").primaryKey(),
+    companyId: text("company_id")
+      .notNull()
+      .references(() => companiesTable.id, { onDelete: "cascade" }),
+    initiatedById: text("initiated_by_id")
+      .notNull()
+      .references(() => usersTable.id),
+    status: text("status").notNull().default("pending"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("company_deletion_one_pending_per_company")
+      .on(table.companyId)
+      .where(sql`${table.status} = 'pending'`),
+  ],
+);
+
+export const companyDeletionVotesTable = pgTable(
+  "company_deletion_votes",
+  {
+    id: text("id").primaryKey(),
+    proposalId: text("proposal_id")
+      .notNull()
+      .references(() => companyDeletionProposalsTable.id, {
+        onDelete: "cascade",
+      }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => usersTable.id),
+    vote: boolean("vote"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("company_deletion_one_vote_per_user").on(
+      table.proposalId,
       table.userId,
     ),
   ],

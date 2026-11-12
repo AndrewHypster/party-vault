@@ -28,6 +28,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           name: fullName || user.email,
           firstName,
           lastName: lastNameParts.join(" "),
+          avatar: null,
         })
         .onConflictDoUpdate({
           target: usersTable.email,
