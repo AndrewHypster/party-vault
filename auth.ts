@@ -1,5 +1,6 @@
 import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
+import { eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { usersTable } from "@/db/schema";
 
@@ -29,9 +30,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           lastName: lastNameParts.join(" "),
         })
         .onConflictDoUpdate({
-          target: usersTable.id,
+          target: usersTable.email,
           set: {
-            email: user.email,
             name: fullName || user.email,
           },
         });
@@ -39,8 +39,18 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return true;
     },
     async jwt({ token, user }) {
-      if (user?.id) {
-        token.userId = user.id;
+      if (user?.email) {
+        const [storedUser] = await getDb()
+          .select({ id: usersTable.id })
+          .from(usersTable)
+          .where(eq(usersTable.email, user.email))
+          .limit(1);
+
+        if (!storedUser) {
+          throw new Error("Не вдалося знайти профіль після входу через Google.");
+        }
+
+        token.userId = storedUser.id;
       }
       return token;
     },
